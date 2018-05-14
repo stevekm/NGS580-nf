@@ -1459,24 +1459,109 @@ process mutect2 {
 }
 
 
-// ~~~~~~ ANNOTATION ~~~~~~ //
-samples_lofreq_vcf.concat(sample_vcf_hc2)
-                    .combine(annovar_db_dir)
-                    // only entries that have variants present; more than one .TSV file line
-                    .filter { caller, sampleID, sample_vcf, sample_tsv, annovar_db ->
-                        // long count = sample_tsv.readLines().size() // <- THIS WORKS but loads entire file
-                        long count = Files.lines(sample_tsv).count()
-                        count > 1
-                    }
-                    .set { samples_vcfs_tsvs_filtered }
+process check_samples_mutect2 {
+    executor "local"
+    input:
+    set val(caller), val(comparisonID), val(tumorID), val(normalID), val(chrom), file(filtered_vcf), file(reformat_tsv) from samples_mutect2
 
-samples_mutect2.combine(annovar_db_dir2)
+    output:
+    set val(caller), val(comparisonID), val(tumorID), val(normalID), val(chrom), file(filtered_vcf), file(reformat_tsv) into samples_mutect2_checked
+    val(comparisonID) into done_check_samples_mutect2
+
+    script:
+    """
+    """
+}
+
+
+// ~~~~~~ ANNOTATION ~~~~~~ //
+failed_items = Channel.create()
+samples_lofreq_vcf.concat(sample_vcf_hc2).set { samples_vcfs_tsvs_inputs }
+                    // .combine(annovar_db_dir).set { samples_vcfs_tsvs }
+
+// Choose only entries that have variants present; more than one .TSV file line
+samples_vcfs_tsvs_good = Channel.create()
+samples_vcfs_tsvs_bad = Channel.create()
+
+samples_vcfs_tsvs_inputs.choice( samples_vcfs_tsvs_good, samples_vcfs_tsvs_bad ){ items ->
+    def caller =  items[0]
+    def sampleID =  items[1]
+    def sample_vcf =  items[2]
+    def sample_tsv =  items[3]
+    def output = 1 // bad by default
+    long count = Files.lines(sample_tsv).count()
+    if (count > 1) output = 0 // good if has >1 lines
+    println "[samples_vcfs_tsvs_inputs] ${sample_tsv} ${count} ${output}"
+    return output
+    }
+
+// add ANNOVAR db
+samples_vcfs_tsvs_good.map { items ->
+    println "[samples_vcfs_tsvs_good] ${items}"
+    return(items)
+    }
+    .combine(annovar_db_dir).set { samples_vcfs_tsvs_filtered }
+
+// log the files that did not have enough
+samples_vcfs_tsvs_bad.map { caller, sampleID, sample_vcf, sample_tsv ->
+    def reason = "Too few lines in sample_tsv, skipping annotation"
+    def output = [reason, sampleID, caller, sample_vcf, sample_tsv].join('\t')
+    println "[samples_vcfs_tsvs_bad] ${output}"
+    return(output)
+    }.set { samples_vcfs_tsvs_failed }
+// .filter { caller, sampleID, sample_vcf, sample_tsv, annovar_db ->
+//     // long count = sample_tsv.readLines().size() // <- THIS WORKS but loads entire file
+//     long count = Files.lines(sample_tsv).count()
+//     count > 1
+// }
+// .set { samples_vcfs_tsvs_filtered }
+
+
+// Choose only entries that have variants present; more than one .TSV file line
+samples_pairs_vcfs_tsvs = Channel.create()
+samples_pairs_vcfs_tsvs_good = Channel.create()
+samples_pairs_vcfs_tsvs_bad = Channel.create()
+
+samples_pairs_vcfs_tsvs.concat(
+    samples_mutect2_checked
+    ).set { samples_pairs_vcfs_tsvs_inputs }
+
+samples_pairs_vcfs_tsvs_inputs.choice( samples_pairs_vcfs_tsvs_good, samples_pairs_vcfs_tsvs_bad ){ items ->
+    def caller = items[0]
+    def comparisonID = items[1]
+    def tumorID = items[2]
+    def normalID = items[3]
+    def chrom = items[4]
+    def sample_vcf = items[5]
+    def sample_tsv = items[6]
+    def output = 1 // bad by default
+    long count = Files.lines(sample_tsv).count()
+    if (count > 1) output = 0 // good if has >1 lines
+    println "[samples_pairs_vcfs_tsvs_inputs] ${sample_tsv} ${count} ${output}"
+    return output
+}
+
+samples_pairs_vcfs_tsvs_good.combine(annovar_db_dir2)
+                            .map { items ->
+                                println "[samples_pairs_vcfs_tsvs_good] ${items}"
+                                return(items)
+                            }
+                            .set { samples_pairs_vcfs_tsvs_filtered }
                 // only entries that have variants present; more than one .TSV file line
-                .filter { caller, comparisonID, tumorID, normalID, chrom, sample_vcf, sample_tsv, annovar_db ->
-                    long count = Files.lines(sample_tsv).count()
-                    count > 1
-                }
-                .set { samples_mutect2_vcfs_tsvs_filtered }
+                // .filter { caller, comparisonID, tumorID, normalID, chrom, sample_vcf, sample_tsv, annovar_db ->
+                //     long count = Files.lines(sample_tsv).count()
+                //     count > 1
+                // }
+
+// log the files that did not have enough
+samples_pairs_vcfs_tsvs_bad.map { caller, comparisonID, tumorID, normalID, chrom, sample_vcf, sample_tsv ->
+    def reason = "Too few lines in sample_tsv, skipping annotation"
+    def output = [reason, tumorID, normalID, chrom, comparisonID, caller, sample_vcf, sample_tsv].join('\t')
+    println "[samples_pairs_vcfs_tsvs_bad] ${output}"
+    return(output)
+    }.set { pairs_vcfs_tsvs_failed }
+
+
 
 process annotate {
     // annotate the VCF file
@@ -1531,6 +1616,7 @@ process annotate {
 
         # add the hash per variant
         hash-col.py -i "${annotations_tmp}" -o "${annotations_tsv}" --header 'Hash' -k Chr Start End Ref Alt CHROM POS REF ALT Sample Run Results VariantCaller
+
         """
     else if( caller == 'LoFreq' )
         """
@@ -1566,7 +1652,7 @@ process annotate_pairs {
     publishDir "${params.output_dir}/analysis/annotate", overwrite: true
 
     input:
-    set val(caller), val(comparisonID), val(tumorID), val(normalID), val(chrom), file(sample_vcf), file(sample_tsv), file(annovar_db_dir) from samples_mutect2_vcfs_tsvs_filtered
+    set val(caller), val(comparisonID), val(tumorID), val(normalID), val(chrom), file(sample_vcf), file(sample_tsv), file(annovar_db_dir) from samples_pairs_vcfs_tsvs_filtered
 
     output:
     file("${annotations_tsv}") into annotations_tables_pairs
@@ -1660,14 +1746,15 @@ done_copy_samplesheet.concat(
     done_sambamba_flagstat_table,
     done_sambamba_dedup_flagstat_table,
     done_update_coverage_tables,
-    done_update_interval_tables
+    done_update_interval_tables,
+    done_check_samples_mutect2
     )
     .tap { all_done1; all_done2 }
 
 process custom_analysis_report {
     tag "${html_output}"
     publishDir "${params.output_dir}/analysis/reports", mode: 'copy', overwrite: true
-    // executor "local"
+    executor "local"
 
     input:
     val(items) from all_done1.collect()
@@ -1716,9 +1803,27 @@ process multiqc {
 }
 
 
+// ~~~~~~~~~~~~~~~ PIPELINE COMPLETION EVENTS ~~~~~~~~~~~~~~~~~~~ //
+// close manually created channels
+samples_vcfs_tsvs_good.close()
+samples_vcfs_tsvs_filtered.close()
+samples_vcfs_tsvs_bad.close()
+samples_pairs_vcfs_tsvs.close()
+samples_pairs_vcfs_tsvs_good.close()
+samples_pairs_vcfs_tsvs_bad.close()
+
+Channel.from('test').set { test_test }
+failed_items.concat(
+    test_test,
+    samples_vcfs_tsvs_failed,
+    pairs_vcfs_tsvs_failed
+    ).collectFile(storeDir: "${params.output_dir}/analysis", name: 'failed.txt', newLine: true)
+failed_items.close()
+
+// get email attachments
 Channel.fromPath( file(params.samples_analysis_sheet) ).set{ samples_analysis_sheet }
 def attachments = samples_analysis_sheet.toList().getVal()
-// ~~~~~~~~~~~~~~~ PIPELINE COMPLETION EVENTS ~~~~~~~~~~~~~~~~~~~ //
+
 workflow.onComplete {
 
     def status = "NA"
