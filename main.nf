@@ -794,7 +794,7 @@ process update_coverage_tables {
     publishDir "${params.output_dir}/samples/${sampleID}", overwrite: true
 
     input:
-    set val(sampleID), val(mode), file(sample_summary) from qc_target_reads_gatk_beds.concat(qc_target_reads_gatk_pad100s, qc_target_reads_gatk_pad500s, qc_target_reads_gatk_genomes)
+    set val(sampleID), val(mode), file(sample_summary) from qc_target_reads_gatk_beds.mix(qc_target_reads_gatk_pad100s, qc_target_reads_gatk_pad500s, qc_target_reads_gatk_genomes)
 
     output:
     file("${output_file}") into updated_coverage_tables
@@ -1459,24 +1459,9 @@ process mutect2 {
 }
 
 
-process check_samples_mutect2 {
-    executor "local"
-    input:
-    set val(caller), val(comparisonID), val(tumorID), val(normalID), val(chrom), file(filtered_vcf), file(reformat_tsv) from samples_mutect2
-
-    output:
-    set val(caller), val(comparisonID), val(tumorID), val(normalID), val(chrom), file(filtered_vcf), file(reformat_tsv) into samples_mutect2_checked
-    val(comparisonID) into done_check_samples_mutect2
-
-    script:
-    """
-    """
-}
-
-
 // ~~~~~~ ANNOTATION ~~~~~~ //
-failed_items = Channel.create()
-samples_lofreq_vcf.concat(sample_vcf_hc2).set { samples_vcfs_tsvs_inputs }
+// failed_items = Channel.create()
+samples_lofreq_vcf.mix(sample_vcf_hc2).set { samples_vcfs_tsvs_inputs }
                     // .combine(annovar_db_dir).set { samples_vcfs_tsvs }
 
 // Choose only entries that have variants present; more than one .TSV file line
@@ -1508,7 +1493,9 @@ samples_vcfs_tsvs_bad.map { caller, sampleID, sample_vcf, sample_tsv ->
     def output = [reason, sampleID, caller, sample_vcf, sample_tsv].join('\t')
     println "[samples_vcfs_tsvs_bad] ${output}"
     return(output)
-    }.set { samples_vcfs_tsvs_failed }
+    }
+    .collectFile(storeDir: "${params.output_dir}/analysis", name: 'failed.samples.txt', newLine: true)
+    // .set { samples_vcfs_tsvs_failed }
 // .filter { caller, sampleID, sample_vcf, sample_tsv, annovar_db ->
 //     // long count = sample_tsv.readLines().size() // <- THIS WORKS but loads entire file
 //     long count = Files.lines(sample_tsv).count()
@@ -1522,8 +1509,8 @@ samples_pairs_vcfs_tsvs = Channel.create()
 samples_pairs_vcfs_tsvs_good = Channel.create()
 samples_pairs_vcfs_tsvs_bad = Channel.create()
 
-samples_pairs_vcfs_tsvs.concat(
-    samples_mutect2_checked
+samples_pairs_vcfs_tsvs.mix(
+    samples_mutect2
     ).set { samples_pairs_vcfs_tsvs_inputs }
 
 samples_pairs_vcfs_tsvs_inputs.choice( samples_pairs_vcfs_tsvs_good, samples_pairs_vcfs_tsvs_bad ){ items ->
@@ -1559,7 +1546,9 @@ samples_pairs_vcfs_tsvs_bad.map { caller, comparisonID, tumorID, normalID, chrom
     def output = [reason, tumorID, normalID, chrom, comparisonID, caller, sample_vcf, sample_tsv].join('\t')
     println "[samples_pairs_vcfs_tsvs_bad] ${output}"
     return(output)
-    }.set { pairs_vcfs_tsvs_failed }
+    }
+    .collectFile(storeDir: "${params.output_dir}/analysis", name: 'failed.pairs.txt', newLine: true)
+    // .set { pairs_vcfs_tsvs_failed }
 
 
 
@@ -1746,8 +1735,7 @@ done_copy_samplesheet.concat(
     done_sambamba_flagstat_table,
     done_sambamba_dedup_flagstat_table,
     done_update_coverage_tables,
-    done_update_interval_tables,
-    done_check_samples_mutect2
+    done_update_interval_tables
     )
     .tap { all_done1; all_done2 }
 
@@ -1804,21 +1792,22 @@ process multiqc {
 
 
 // ~~~~~~~~~~~~~~~ PIPELINE COMPLETION EVENTS ~~~~~~~~~~~~~~~~~~~ //
-// close manually created channels
-samples_vcfs_tsvs_good.close()
-samples_vcfs_tsvs_filtered.close()
-samples_vcfs_tsvs_bad.close()
-samples_pairs_vcfs_tsvs.close()
-samples_pairs_vcfs_tsvs_good.close()
-samples_pairs_vcfs_tsvs_bad.close()
+// TODO: verify that this is correct way to finish channels;
+// samples_vcfs_tsvs_good.close()
+// samples_vcfs_tsvs_bad.close()
+// samples_pairs_vcfs_tsvs.close()
+// samples_pairs_vcfs_tsvs_good.close()
+// samples_pairs_vcfs_tsvs_bad.close()
 
-Channel.from('test').set { test_test }
-failed_items.concat(
-    test_test,
-    samples_vcfs_tsvs_failed,
-    pairs_vcfs_tsvs_failed
-    ).collectFile(storeDir: "${params.output_dir}/analysis", name: 'failed.txt', newLine: true)
-failed_items.close()
+// Collect failed items
+// Channel.from('test').set { test_test }
+// failed_items.mix(
+//     test_test,
+//     samples_vcfs_tsvs_failed,
+//     pairs_vcfs_tsvs_failed
+//     )
+// .collectFile(storeDir: "${params.output_dir}/analysis", name: 'failed.txt', newLine: true)
+// failed_items.close()
 
 // get email attachments
 Channel.fromPath( file(params.samples_analysis_sheet) ).set{ samples_analysis_sheet }
